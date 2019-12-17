@@ -26,20 +26,20 @@
 //! 12-25 12:00:00.000  1234  1234 W MyApp: Don't log sensitive information!
 //! 12-25 12:00:00.000  1234  1234 E MyApp: Nothing more to say
 
-extern crate log;
 extern crate android_liblog_sys;
+extern crate log;
 
 use std::ffi::CString;
 
-use log::{Log, LogLevel, LogLevelFilter, LogMetadata, LogRecord, SetLoggerError};
-use android_liblog_sys::{__android_log_write, LogPriority};
+use android_liblog_sys::{LogPriority, __android_log_write};
+use log::{Level, LevelFilter, Log, Metadata, Record, SetLoggerError};
 
 /// `AndroidLogger` is the implementation of the logger.
 ///
 /// It should not be used from Rust libraries which should only use the facade.
 pub struct AndroidLogger {
     tag: CString,
-    format: Box<Fn(&LogRecord) -> String + Sync + Send>,
+    format: Box<dyn Fn(&Record) -> String + Sync + Send>,
 }
 
 /// `LogBuilder` acts as builder for initializing the `AndroidLogger`. It can be
@@ -51,11 +51,11 @@ pub struct AndroidLogger {
 /// #[macro_use] extern crate log;
 /// extern crate android_log;
 ///
-/// use log::{LogRecord, LogLevelFilter};
+/// use log::{Record, LevelFilter};
 /// use android_log::LogBuilder;
 ///
 /// fn main() {
-///     let format = |record: &LogRecord| {
+///     let format = |record: &Record| {
 ///         format!("{} - {}", record.target(), record.args())
 ///     };
 ///
@@ -70,7 +70,7 @@ pub struct AndroidLogger {
 /// ```
 pub struct LogBuilder {
     tag: CString,
-    format: Box<Fn(&LogRecord) -> String + Sync + Send>,
+    format: Box<dyn Fn(&Record) -> String + Sync + Send>,
 }
 
 /// Initializes the global logger with an `AndroidLogger`
@@ -90,19 +90,16 @@ impl AndroidLogger {
 
     /// Initializes the global logger with `self`
     pub fn init(self) -> Result<(), SetLoggerError> {
-        log::set_logger(|max_level| {
-            max_level.set(LogLevelFilter::max());
-            Box::new(self)
-        })
+        log::set_boxed_logger(Box::new(self)).map(|_| log::set_max_level(LevelFilter::max()))
     }
 }
 
 impl Log for AndroidLogger {
-    fn enabled(&self, _: &LogMetadata) -> bool {
+    fn enabled(&self, _: &Metadata) -> bool {
         true
     }
 
-    fn log(&self, record: &LogRecord) {
+    fn log(&self, record: &Record) {
         if !Log::enabled(self, record.metadata()) {
             return;
         }
@@ -110,17 +107,19 @@ impl Log for AndroidLogger {
         let format = CString::new((self.format)(record)).unwrap();
 
         let prio = match record.level() {
-            LogLevel::Error => LogPriority::ERROR,
-            LogLevel::Warn => LogPriority::WARN,
-            LogLevel::Info => LogPriority::INFO,
-            LogLevel::Debug => LogPriority::DEBUG,
-            LogLevel::Trace => LogPriority::VERBOSE,
+            Level::Error => LogPriority::ERROR,
+            Level::Warn => LogPriority::WARN,
+            Level::Info => LogPriority::INFO,
+            Level::Debug => LogPriority::DEBUG,
+            Level::Trace => LogPriority::VERBOSE,
         };
 
         unsafe {
             __android_log_write(prio as _, self.tag.as_ptr(), format.as_ptr());
         }
     }
+
+    fn flush(&self) {}
 }
 
 impl LogBuilder {
@@ -128,15 +127,16 @@ impl LogBuilder {
     pub fn new<S: Into<String>>(tag: S) -> LogBuilder {
         LogBuilder {
             tag: CString::new(tag.into()).unwrap(),
-            format: Box::new(|record: &LogRecord| {
-                format!("{}: {}", record.location().module_path(), record.args())
+            format: Box::new(|record: &Record| {
+                format!("{}: {}", record.module_path().unwrap_or(""), record.args())
             }),
         }
     }
 
     /// Sets the format function for formatting the log output
     pub fn format<F: 'static>(&mut self, format: F) -> &mut Self
-        where F: Fn(&LogRecord) -> String + Sync + Send
+    where
+        F: Fn(&Record) -> String + Sync + Send,
     {
         self.format = Box::new(format);
         self
